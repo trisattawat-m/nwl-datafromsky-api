@@ -1,51 +1,69 @@
 import { sql, poolPromise } from '../config/db.js';
 
-export default async function getData(req, res) {
+export default async function getDataFromRaw(req, res) {
     try {
-        const { name, page = 1, limit = 20 } = req.query;
-        const tableName = 'DataFromWebHook';
+        const { name, page = 1, perPage = 20, orderBy = 'ASC' } = req.query;
+        const tableName = 'WebHookEvent';
 
         const pageNum = Math.max(parseInt(page, 10), 1);
-        const limitNum = Math.max(parseInt(limit, 10), 1);
-        const offset = (pageNum - 1) * limitNum;
+        const perPageNum = Math.max(parseInt(perPage, 10), 1);
+        const offset = (pageNum - 1) * perPageNum;
 
         const pool = await poolPromise;
 
-        // Base query
-        let query = `SELECT * FROM ${tableName}`;
+        const sortOrder = orderBy.toUpperCase() === 'DESC' ? 'DESC' : 'ASC';
 
-        // Use parameterized query for safety
+        let query = `SELECT id, payload, timestamp FROM ${tableName}`;
         const request = pool.request()
             .input('Offset', sql.Int, offset)
-            .input('Limit', sql.Int, limitNum);
+            .input('Limit', sql.Int, perPageNum);
 
-        if (name && name.trim()) {
-            query += ` WHERE payload_name = @Name`;
-            request.input('Name', sql.VarChar, name.trim());
-        }
+        query += ` ORDER BY id ${sortOrder}`;
 
-        // Pagination
         query += `
-            ORDER BY record_id
-            OFFSET @Offset ROWS
-            FETCH NEXT @Limit ROWS ONLY
-        `;
+      OFFSET @Offset ROWS
+      FETCH NEXT @Limit ROWS ONLY
+    `;
 
         const result = await request.query(query);
-
         if (!result.recordset || result.recordset.length === 0) {
-            return res.status(404).json({ error: 'No data found' });
+            return res.status(404).json({ error: 'No raw data found' });
         }
+
+
+        const formatted = result.recordset
+            .map(row => {
+                let parsedPayload;
+                try {
+                    parsedPayload = JSON.parse(row.payload);
+                } catch (err) {
+                    parsedPayload = {};
+                }
+
+
+                return {
+                    id: row.id,
+                    timestamp: row.timestamp,
+                    payload_name: parsedPayload.name || null,
+                    payload_value: parsedPayload.value || null,
+                    raw: parsedPayload
+                };
+            })
+
+            .filter(item => {
+                if (!name || !name.trim()) return true;
+                return item.payload_name?.toLowerCase() === name.trim().toLowerCase();
+            });
 
         return res.json({
             page: pageNum,
-            limit: limitNum,
-            count: result.recordset.length,
-            data: result.recordset
+            limit: perPageNum,
+            count: formatted.length,
+            data: formatted
         });
 
     } catch (error) {
-        console.error('Error fetching device data:', error);
+        console.error('Error fetching raw data:', error);
         return res.status(500).json({ error: 'Internal server error' });
     }
 }
